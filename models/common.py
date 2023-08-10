@@ -23,6 +23,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from torch.cuda import amp
+from torch.ao.quantization import QuantStub, DeQuantStub
 from ultralytics.utils.plotting import Annotator, colors, save_one_box
 
 from utils import TryExcept
@@ -44,20 +45,40 @@ def autopad(k, p=None, d=1):  # kernel, padding, dilation
 
 class Conv(nn.Module):
     # Standard convolution with args(ch_in, ch_out, kernel, stride, padding, groups, dilation, activation)
-    default_act = nn.SiLU()  # default activation
+    default_act = nn.Sigmoid()  # default activation
+#     default_act = nn.ReLU6()
+#     default_act = nn.SiLU()
 
     def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
         super().__init__()
+        self.quant = QuantStub()
         self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False)
         self.bn = nn.BatchNorm2d(c2)
+#         self.relu6 = nn.quantized.ReLU6()
+#         self.act = nn.Sigmoid()
+        self.first_functional = nn.quantized.FloatFunctional()
         self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+        self.dequant = DeQuantStub()
 
     def forward(self, x):
-        return self.act(self.bn(self.conv(x)))
+        x = self.quant(x)
+        x = self.conv(x)
+        x = self.bn(x) 
+        y = self.act(x)
+        x = self.first_functional.mul(y,x) 
+#         x = self.act(x)
+        x = self.dequant(x)
+        return x
 
     def forward_fuse(self, x):
-        return self.act(self.conv(x))
-
+        x = self.quant(x)
+        x = self.conv(x)
+#         x = self.first_functional.mul(y,x) 
+        y = self.act(x)
+        x = self.first_functional.mul(y,x) 
+#         x = self.act(x)
+        x = self.dequant(x)
+        return x
 
 class DWConv(Conv):
     # Depth-wise convolution
@@ -158,6 +179,7 @@ class C3(nn.Module):
     def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
+        
         self.cv1 = Conv(c1, c_, 1, 1)
         self.cv2 = Conv(c1, c_, 1, 1)
         self.cv3 = Conv(2 * c_, c2, 1)  # optional act=FReLU(c2)
@@ -165,6 +187,9 @@ class C3(nn.Module):
 
     def forward(self, x):
         return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
+    
+    
+    
 
 
 class C3x(C3):

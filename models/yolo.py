@@ -28,6 +28,7 @@ from utils.general import LOGGER, check_version, check_yaml, make_divisible, pri
 from utils.plots import feature_visualization
 from utils.torch_utils import (fuse_conv_and_bn, initialize_weights, model_info, profile, scale_img, select_device,
                                time_sync)
+from torch.ao.quantization import QuantStub, DeQuantStub
 
 try:
     import thop  # for FLOPs computation
@@ -50,13 +51,17 @@ class Detect(nn.Module):
         self.grid = [torch.empty(0) for _ in range(self.nl)]  # init grid
         self.anchor_grid = [torch.empty(0) for _ in range(self.nl)]  # init anchor grid
         self.register_buffer('anchors', torch.tensor(anchors).float().view(self.nl, -1, 2))  # shape(nl,na,2)
+        self.m_quant = nn.ModuleList(QuantStub() for x in ch)
+        self.m_dequant = nn.ModuleList(DeQuantStub() for x in ch)
         self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # output conv
         self.inplace = inplace  # use inplace ops (e.g. slice assignment)
 
     def forward(self, x):
         z = []  # inference output
         for i in range(self.nl):
+            x[i] = self.m_quant[i](x[i])
             x[i] = self.m[i](x[i])  # conv
+            x[i] = self.m_dequant[i](x[i])
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
 
@@ -118,6 +123,7 @@ class BaseModel(nn.Module):
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
                 self._profile_one_layer(m, x, dt)
+                
             x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
@@ -255,11 +261,14 @@ class DetectionModel(BaseModel):
         # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1.
         m = self.model[-1]  # Detect() module
         for mi, s in zip(m.m, m.stride):  # from
+#             print ("inside initialize bias ")
+#             print (mi,mi.conv.bias)
             b = mi.bias.view(m.na, -1)  # conv.bias(255) to (3,85)
+#             print (b)
             b.data[:, 4] += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
             b.data[:, 5:5 + m.nc] += math.log(0.6 / (m.nc - 0.99999)) if cf is None else torch.log(cf / cf.sum())  # cls
             mi.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
-
+#             print (mi.bias)
 
 Model = DetectionModel  # retain YOLOv5 'Model' class for backwards compatibility
 
