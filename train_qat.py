@@ -140,11 +140,19 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         LOGGER.info(f'Transferred {len(csd)}/{len(model.state_dict())} items from {weights}')  # report
     else:
         model = Model(cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
-    amp = check_amp(model)  # check AMP
+        print (model)
 
+
+    for name, module in model.named_modules():
+        print(name)
+    for param in model.parameters():
+        # Check if parameter dtype is  Half (float16)
+        if param.dtype == torch.float16:
+            param.data = param.data.to(torch.float32)
+    amp = check_amp(model)  # check AMP
+    amp = False
     # Freeze
     freeze = [f'model.{x}.' for x in (freeze if len(freeze) > 1 else range(freeze[0]))]  # layers to freeze
-    print (freeze)
     for k, v in model.named_parameters():
         v.requires_grad = True  # train all layers
         # v.register_hook(lambda x: torch.nan_to_num(x))  # NaN to 0 (commented for erratic training results)
@@ -261,8 +269,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     
     model.eval()
     model.qconfig = torch.ao.quantization.get_default_qat_qconfig('x86')
-    model_fused = torch.ao.quantization.fuse_modules(model, [['model.0.conv', 'model.0.bn']])
-    model_fused_and_prepared = torch.ao.quantization.prepare(model_fused)
+    model_fused = torch.ao.quantization.fuse_modules(model, [['model.0.Conv', 'model.0.bn']])
+    model_fused_and_prepared = torch.ao.quantization.prepare_qat(model_fused.train())
 
     #Start training
     t0 = time.time()
@@ -333,7 +341,14 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     imgs = nn.functional.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
 
             # Forward
+            print("test: " + str(amp))
             with torch.cuda.amp.autocast(amp):
+                for param in model_fused_and_prepared.parameters():
+                    # Check if parameter dtype is  Half (float16)
+                    if param.dtype == torch.float16:
+                        param.data = param.data.to(torch.float32)
+
+                print (imgs.dtype)
                 pred = model_fused_and_prepared(imgs)  # forward
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                 if RANK != -1:
@@ -367,12 +382,18 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         # Scheduler
         lr = [x['lr'] for x in optimizer.param_groups]  # for loggers
         scheduler.step()
-
+#         if epoch > 3:
+#         # Freeze quantizer parameters
+#             model_fused_and_prepared.apply(torch.ao.quantization.disable_observer)
+#         if epoch > 2:
+#         # Freeze batch norm mean and variance estimates
+#             model_fused_and_prepared.apply(torch.nn.intrinsic.qat.freeze_bn_stats)
         if RANK in {-1, 0}:
             # mAP
             callbacks.run('on_train_epoch_end', epoch=epoch)
             final_epoch = (epoch + 1 == epochs) or stopper.possible_stop
-            quantized_model = torch.ao.quantization.convert(model_fused_and_prepared.eval())
+            model_fused_and_prepared = model_fused_and_prepared.to('cpu')
+            quantized_model = torch.ao.quantization.convert(model_fused_and_prepared.eval(), inplace = False)
             print('Quantization aware training : Convert done')
             print("Size of model after quantization")
             print_size_of_model(quantized_model)
@@ -466,7 +487,7 @@ def parse_opt(known=False):
     parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
     parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='dataset.yaml path')
     parser.add_argument('--hyp', type=str, default=ROOT / 'data/hyps/hyp.scratch-low.yaml', help='hyperparameters path')
-    parser.add_argument('--epochs', type=int, default=10, help='total training epochs')
+    parser.add_argument('--epochs', type=int, default=5, help='total training epochs')
     parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs, -1 for autobatch')
     parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=640, help='train, val image size (pixels)')
     parser.add_argument('--rect', action='store_true', help='rectangular training')
