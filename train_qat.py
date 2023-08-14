@@ -143,12 +143,12 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         print (model)
 
 
-    for name, module in model.named_modules():
-        print(name)
-    for param in model.parameters():
-        # Check if parameter dtype is  Half (float16)
-        if param.dtype == torch.float16:
-            param.data = param.data.to(torch.float32)
+    # for name, module in model.named_modules():
+    #     print(name)
+    # for param in model.parameters():
+    #     # Check if parameter dtype is  Half (float16)
+    #     if param.dtype == torch.float16:
+    #         param.data = param.data.to(torch.float32)
     amp = check_amp(model)  # check AMP
     amp = False
     # Freeze
@@ -183,13 +183,13 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)  # plot_lr_scheduler(optimizer, scheduler, epochs)
 
     # EMA
-    ema = ModelEMA(model) if RANK in {-1, 0} else None
+    # ema = ModelEMA(model) if RANK in {-1, 0} else None
 
     # Resume
     best_fitness, start_epoch = 0.0, 0
     if pretrained:
         if resume:
-            best_fitness, start_epoch, epochs = smart_resume(ckpt, optimizer, ema, weights, epochs, resume)
+            best_fitness, start_epoch, epochs = smart_resume(ckpt, optimizer, model, weights, epochs, resume)
         del ckpt, csd
 
     # DP mode
@@ -269,7 +269,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     
     model.eval()
     model.qconfig = torch.ao.quantization.get_default_qat_qconfig('x86')
-    model_fused = torch.ao.quantization.fuse_modules(model, [['model.0.Conv', 'model.0.bn']])
+    model_fused = torch.ao.quantization.fuse_modules(model, [['model.0.conv', 'model.0.bn']])
     model_fused_and_prepared = torch.ao.quantization.prepare_qat(model_fused.train())
 
     #Start training
@@ -283,7 +283,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     scheduler.last_epoch = start_epoch - 1  # do not move
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
     stopper, stop = EarlyStopping(patience=opt.patience), False
-    compute_loss = ComputeLoss(model_fused_and_prepared)  # init loss class
+    compute_loss = ComputeLoss(model_fused_and_prepared,device)  # init loss class
     callbacks.run('on_train_start')
     LOGGER.info(f'Image sizes {imgsz} train, {imgsz} val\n'
                 f'Using {train_loader.num_workers * WORLD_SIZE} dataloader workers\n'
@@ -293,6 +293,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         callbacks.run('on_train_epoch_start')
+        model_fused_and_prepared.to(device)
         model_fused_and_prepared.train()
         print('Quantization Aware Training Prepare: Inserting Observers')
         # Update image weights (optional, single-GPU only)
@@ -318,7 +319,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
             
-            print ("warmup start")
+            # print ("warmup start")
             # Warmup
             if ni <= nw:
                 xi = [0, nw]  # x interp
@@ -340,15 +341,21 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
                     imgs = nn.functional.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
 
+
+            # print (next(model.parameters()).is_cuda)
+
+            # for name, param in model.named_parameters():
+            #     if param.requires_grad:
+            #         print (name, param.data)
             # Forward
-            print("test: " + str(amp))
+            # print("test: " + str(amp))
             with torch.cuda.amp.autocast(amp):
                 for param in model_fused_and_prepared.parameters():
                     # Check if parameter dtype is  Half (float16)
                     if param.dtype == torch.float16:
                         param.data = param.data.to(torch.float32)
 
-                print (imgs.dtype)
+                # print (imgs.dtype)
                 pred = model_fused_and_prepared(imgs)  # forward
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                 if RANK != -1:
@@ -382,12 +389,12 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         # Scheduler
         lr = [x['lr'] for x in optimizer.param_groups]  # for loggers
         scheduler.step()
-#         if epoch > 3:
-#         # Freeze quantizer parameters
-#             model_fused_and_prepared.apply(torch.ao.quantization.disable_observer)
-#         if epoch > 2:
-#         # Freeze batch norm mean and variance estimates
-#             model_fused_and_prepared.apply(torch.nn.intrinsic.qat.freeze_bn_stats)
+        if epoch > (epochs - 4):
+        # Freeze quantizer parameters
+            model_fused_and_prepared.apply(torch.ao.quantization.disable_observer)
+        if epoch > (epochs - 4):
+        # Freeze batch norm mean and variance estimates
+            model_fused_and_prepared.apply(torch.nn.intrinsic.qat.freeze_bn_stats)
         if RANK in {-1, 0}:
             # mAP
             callbacks.run('on_train_epoch_end', epoch=epoch)
@@ -397,12 +404,13 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             print('Quantization aware training : Convert done')
             print("Size of model after quantization")
             print_size_of_model(quantized_model)
+            
             if not noval or final_epoch:  # Calculate mAP
                 results, maps, _ = validate.run(data_dict,
                                                 batch_size=batch_size // WORLD_SIZE * 2,
                                                 imgsz=imgsz,
                                                 half=amp,
-                                                model=quantized_model.eval(),
+                                                model=quantized_model,
                                                 single_cls=single_cls,
                                                 dataloader=val_loader,
                                                 save_dir=save_dir,
@@ -423,9 +431,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 ckpt = {
                     'epoch': epoch,
                     'best_fitness': best_fitness,
-                    'model': deepcopy(de_parallel(model)).half(),
-                    'ema': deepcopy(ema.ema).half(),
-                    'updates': ema.updates,
+                    'model': deepcopy(de_parallel(model)),
                     'optimizer': optimizer.state_dict(),
                     'opt': vars(opt),
                     'git': GIT_INFO,  # {remote, branch, commit} if a git repo
@@ -487,8 +493,8 @@ def parse_opt(known=False):
     parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
     parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='dataset.yaml path')
     parser.add_argument('--hyp', type=str, default=ROOT / 'data/hyps/hyp.scratch-low.yaml', help='hyperparameters path')
-    parser.add_argument('--epochs', type=int, default=5, help='total training epochs')
-    parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs, -1 for autobatch')
+    parser.add_argument('--epochs', type=int, default=20, help='total training epochs')
+    parser.add_argument('--batch-size', type=int, default=8, help='total batch size for all GPUs, -1 for autobatch')
     parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=640, help='train, val image size (pixels)')
     parser.add_argument('--rect', action='store_true', help='rectangular training')
     parser.add_argument('--resume', nargs='?', const=True, default=False, help='resume most recent training')
