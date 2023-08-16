@@ -6,6 +6,7 @@ Models and datasets download automatically from the latest YOLOv5 release.
 Usage - Single-GPU training:
     $ python train.py --data coco128.yaml --weights yolov5s.pt --img 640  # from pretrained (recommended)
     $ python train.py --data coco128.yaml --weights '' --cfg yolov5s.yaml --img 640  # from scratch
+    $ python train.py --data coco.yaml --weights yolov5s.pt --img 640 --hyp hyp.scratch-low.yaml --project qat_lr_1e-3 --epochs 10 --device 0
 
 Usage - Multi-GPU DDP training:
     $ python -m torch.distributed.run --nproc_per_node 4 --master_port 1 train.py --data coco128.yaml --weights yolov5s.pt --img 640 --device 0,1,2,3
@@ -140,7 +141,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         LOGGER.info(f'Transferred {len(csd)}/{len(model.state_dict())} items from {weights}')  # report
     else:
         model = Model(cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
-        print (model)
+        # print (model)
 
 
     # for name, module in model.named_modules():
@@ -266,12 +267,15 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     
     print("Size of model before quantization")
     print_size_of_model(model)
-    
+    # print (model)
     model.eval()
     model.qconfig = torch.ao.quantization.get_default_qat_qconfig('x86')
-    model_fused = torch.ao.quantization.fuse_modules(model, [['model.0.conv', 'model.0.bn']])
-    model_fused_and_prepared = torch.ao.quantization.prepare_qat(model_fused.train())
-
+    for m in model.modules(): 
+         if type(m) == 'models.common.Conv': 
+            torch.ao.quantization.fuse_modules(m.conv, m.bn, inplace=True)
+    # model_fused = torch.ao.quantization.fuse_modules(model, [['model.0.conv', 'model.0.bn']])
+    model_fused_and_prepared = torch.ao.quantization.prepare_qat(model.train())
+    # print ("after fusing the model------------------",model_fused_and_prepared)
     #Start training
     t0 = time.time()
     nb = len(train_loader)  # number of batches
@@ -494,7 +498,7 @@ def parse_opt(known=False):
     parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='dataset.yaml path')
     parser.add_argument('--hyp', type=str, default=ROOT / 'data/hyps/hyp.scratch-low.yaml', help='hyperparameters path')
     parser.add_argument('--epochs', type=int, default=20, help='total training epochs')
-    parser.add_argument('--batch-size', type=int, default=8, help='total batch size for all GPUs, -1 for autobatch')
+    parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs, -1 for autobatch')
     parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=640, help='train, val image size (pixels)')
     parser.add_argument('--rect', action='store_true', help='rectangular training')
     parser.add_argument('--resume', nargs='?', const=True, default=False, help='resume most recent training')
@@ -581,10 +585,12 @@ def main(opt, callbacks=Callbacks()):
 
     # Train
     if not opt.evolve:
+        print ("-----------------------")
         train(opt.hyp, opt, device, callbacks)
 
     # Evolve hyperparameters (optional)
     else:
+        print ("hypreparameters")
         # Hyperparameter evolution metadata (mutation scale 0-1, lower_limit, upper_limit)
         meta = {
             'lr0': (1, 1e-5, 1e-1),  # initial learning rate (SGD=1E-2, Adam=1E-3)
