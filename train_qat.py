@@ -49,6 +49,7 @@ ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 import val as validate  # for end-of-epoch mAP
 from models.experimental import attempt_load
 from models.yolo import Model
+from models.common import Conv
 from utils.autoanchor import check_anchors
 from utils.autobatch import check_train_batch_size
 from utils.callbacks import Callbacks
@@ -271,10 +272,14 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     model.eval()
     model.qconfig = torch.ao.quantization.get_default_qat_qconfig('x86')
     for m in model.modules(): 
-         if type(m) == 'models.common.Conv': 
-            torch.ao.quantization.fuse_modules(m.conv, m.bn, inplace=True)
+         if type(m) == Conv:
+            torch.ao.quantization.fuse_modules(m, ['conv',  'bn'], inplace=True)
+    # print(model)
     # model_fused = torch.ao.quantization.fuse_modules(model, [['model.0.conv', 'model.0.bn']])
     model_fused_and_prepared = torch.ao.quantization.prepare_qat(model.train())
+
+    print(model_fused_and_prepared)
+
     # print ("after fusing the model------------------",model_fused_and_prepared)
     #Start training
     t0 = time.time()
@@ -393,7 +398,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         # Scheduler
         lr = [x['lr'] for x in optimizer.param_groups]  # for loggers
         scheduler.step()
-        if epoch > (epochs - 4):
+        if epoch > (epochs - 3):
         # Freeze quantizer parameters
             model_fused_and_prepared.apply(torch.ao.quantization.disable_observer)
         if epoch > (epochs - 4):
