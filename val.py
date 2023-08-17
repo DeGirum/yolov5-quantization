@@ -45,7 +45,7 @@ from utils.general import (LOGGER, TQDM_BAR_FORMAT, Profile, check_dataset, chec
 from utils.metrics import ConfusionMatrix, ap_per_class, box_iou
 from utils.plots import output_to_target, plot_images, plot_val_study
 from utils.torch_utils import select_device, smart_inference_mode
-
+from utils.loss import ComputeLoss
 
 def save_one_txt(predn, save_conf, shape, file):
     # Save one txt result
@@ -105,7 +105,7 @@ def run(
         iou_thres=0.6,  # NMS IoU threshold
         max_det=300,  # maximum detections per image
         task='val',  # train, val, test, speed or study
-        device='',  # cuda device, i.e. 0 or 0,1,2,3 or cpu
+        device='cpu',  # cuda device, i.e. 0 or 0,1,2,3 or cpu
         workers=8,  # max dataloader workers (per RANK in DDP mode)
         single_cls=False,  # treat as single-class dataset
         augment=False,  # augmented inference
@@ -117,7 +117,7 @@ def run(
         project=ROOT / 'runs/val',  # save to project/name
         name='exp',  # save to project/name
         exist_ok=False,  # existing project/name ok, do not increment
-        half=True,  # use FP16 half-precision inference
+        half=False,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
         model=None,
         dataloader=None,
@@ -128,9 +128,10 @@ def run(
 ):
     # Initialize/load model and set device
     training = model is not None
+    # compute_loss =  
     if training:  # called by train.py
         device, pt, jit, engine = next(model.parameters()).device, True, False, False  # get model device, PyTorch model
-        half &= device.type != 'cpu'  # half precision only supported on CUDA
+        # half &= device.type != 'cpu'  # half precision only supported on CUDA
         model.half() if half else model.float()
     else:  # called directly
         device = select_device(device, batch_size=batch_size)
@@ -187,6 +188,7 @@ def run(
     names = model.names if hasattr(model, 'names') else model.module.names  # get class names
     if isinstance(names, (list, tuple)):  # old format
         names = dict(enumerate(names))
+    
     class_map = coco80_to_coco91_class() if is_coco else list(range(1000))
     s = ('%22s' + '%11s' * 6) % ('Class', 'Images', 'Instances', 'P', 'R', 'mAP50', 'mAP50-95')
     tp, fp, p, r, f1, mp, mr, map50, ap50, map = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
@@ -195,6 +197,7 @@ def run(
     jdict, stats, ap, ap_class = [], [], [], []
     callbacks.run('on_val_start')
     pbar = tqdm(dataloader, desc=s, bar_format=TQDM_BAR_FORMAT)  # progress bar
+
     for batch_i, (im, targets, paths, shapes) in enumerate(pbar):
         callbacks.run('on_val_batch_start')
         with dt[0]:
@@ -204,11 +207,12 @@ def run(
             im = im.half() if half else im.float()  # uint8 to fp16/32
             im /= 255  # 0 - 255 to 0.0 - 1.0
             nb, _, height, width = im.shape  # batch size, channels, height, width
+            # print (im.dtype)
 
         # Inference
         with dt[1]:
+            compute_loss = ComputeLoss(model,device)
             preds, train_out = model(im) if compute_loss else (model(im, augment=augment), None)
-
         # Loss
         if compute_loss:
             loss += compute_loss(train_out, targets)[1]  # box, obj, cls
@@ -224,6 +228,7 @@ def run(
                                         multi_label=True,
                                         agnostic=single_cls,
                                         max_det=max_det)
+        
 
         # Metrics
         for si, pred in enumerate(preds):

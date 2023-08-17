@@ -92,8 +92,8 @@ class ComputeLoss:
     sort_obj_iou = False
 
     # Compute losses
-    def __init__(self, model, autobalance=False):
-        device = next(model.parameters()).device  # get model device
+    def __init__(self, model, device, autobalance=False):
+        # device = next(model.parameters()).device  # get model device
         h = model.hyp  # hyperparameters
 
         # Define criteria
@@ -119,6 +119,7 @@ class ComputeLoss:
         self.device = device
 
     def __call__(self, p, targets):  # predictions, targets
+        # print ("=================device inside loss function====================",self.device)
         lcls = torch.zeros(1, device=self.device)  # class loss
         lbox = torch.zeros(1, device=self.device)  # box loss
         lobj = torch.zeros(1, device=self.device)  # object loss
